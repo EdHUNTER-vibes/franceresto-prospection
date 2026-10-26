@@ -155,6 +155,10 @@ def sql_texte(valeur) -> str:
     return "'" + str(valeur).replace("'", "''") + "'"
 
 
+class QuotaD1(RuntimeError):
+    """Limite quotidienne d'écritures de l'offre gratuite de D1 atteinte (remise à zéro à minuit UTC)."""
+
+
 class D1:
     """Requêtes SQL sur la base D1 par l'API de Cloudflare (jeton « D1 Edit »)."""
 
@@ -172,6 +176,8 @@ class D1:
                 continue
             corps = r.json()
             if not corps.get("success"):
+                if any(e.get("code") == 7500 for e in corps.get("errors") or []):
+                    raise QuotaD1("D1 : limite quotidienne d'écritures atteinte")
                 raise RuntimeError(f"D1 : {json.dumps(corps.get('errors'), ensure_ascii=False)[:500]}")
             resultats = corps["result"]
             self.lignes_ecrites += sum(x.get("meta", {}).get("rows_written", 0) for x in resultats)

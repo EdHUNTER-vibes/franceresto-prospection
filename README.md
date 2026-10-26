@@ -47,6 +47,12 @@ Aucune récupération sur les moteurs de recherche, les annuaires, les plateform
 
 Tous les traitements partagent la file `prospection-d1` : ils ne tournent jamais en même temps.
 
+**Passages enchaînés** : la lecture et la recherche des sites travaillent par passages de durée limitée.
+- Chacun enregistre ce qu'il a fait, puis relance le suivant tant qu'il reste du travail (option `enchainer`).
+- GitHub ne garde qu'un seul traitement en attente par file : lancer une autre chaîne en même temps annulerait la relance en attente.
+
+**Limite de D1** : si la limite quotidienne d'écritures de D1 est atteinte, le traitement s'arrête proprement. Le fichier est déjà enregistré sur R2, et la synchronisation de nuit reprend.
+
 **Secrets** :
 - `CLOUDFLARE_API_TOKEN` (D1 : modifier) ;
 - `R2_PROSPECTS_ACCESS_KEY_ID` et `R2_PROSPECTS_SECRET_ACCESS_KEY` (jeton R2 limité au bucket) ;

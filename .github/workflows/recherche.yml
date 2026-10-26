@@ -14,15 +14,24 @@ on:
         default: "35"
       limite:
         description: Nombre maximal d'établissements cherchés
-        default: "3000"
+        default: "400000"
       duree:
         description: Durée maximale de la recherche, en minutes (la lecture des sites trouvés suit, 30 minutes au plus)
         default: "100"
+      enchainer:
+        description: Relancer un passage tant qu'il reste des établissements à chercher
+        type: choice
+        options: ["oui", "non"]
+        default: "oui"
       lire:
         description: Lire ensuite les sites trouvés (adresses e-mail)
         type: choice
         options: ["oui", "non"]
         default: "oui"
+
+permissions:
+  contents: read
+  actions: write  # relance du passage suivant (« enchaîner »)
 
 concurrency:
   group: prospection-d1
@@ -34,6 +43,7 @@ jobs:
     timeout-minutes: 330
     permissions:
       contents: read
+      actions: write
     env:
       DEPARTEMENTS: ${{ inputs.departements }}
       LIMITE: ${{ inputs.limite }}
@@ -95,3 +105,16 @@ jobs:
             [ -f "$fichier" ] || continue
             { echo "### $titre ($DEPARTEMENTS)"; echo '```json'; cat "$fichier"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           done
+
+      - name: Passage suivant (s'il reste du travail)
+        if: ${{ success() && inputs.enchainer == 'oui' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [ -f "$RESUME_RECHERCHE" ] || exit 0
+          restants=$(python -c "import json; print(json.load(open('$RESUME_RECHERCHE'))['restants'])")
+          faits=$(python -c "import json; print(json.load(open('$RESUME_RECHERCHE'))['etablissements'])")
+          echo "Restants : $restants (faits dans ce passage : $faits)"
+          if [ "$restants" -gt 0 ] && [ "$faits" -gt 0 ]; then
+            gh workflow run recherche.yml --ref "$GITHUB_REF_NAME" -f departements="$DEPARTEMENTS" -f limite="$LIMITE" -f duree="$DUREE" -f lire="${{ inputs.lire }}" -f enchainer=oui
+          fi
