@@ -1,0 +1,97 @@
+# Prospection : recherche du site des établissements qui n'en ont pas (domaines tirés du nom et de la
+# commune, retenus seulement si leurs pages citent le SIREN ou l'adresse de l'établissement), puis lecture
+# des sites trouvés (adresses e-mail). Travaille sur le fichier de travail (R2), synchronisé ensuite vers D1.
+# Aucun moteur de recherche ni annuaire, aucun e-mail envoyé. Voir le README.
+# Secrets : CLOUDFLARE_API_TOKEN (« D1 : Edit »), R2_PROSPECTS_ACCESS_KEY_ID, R2_PROSPECTS_SECRET_ACCESS_KEY ;
+# variable ou secret R2_ACCOUNT_ID.
+name: Prospection – recherche des sites
+
+on:
+  workflow_dispatch:
+    inputs:
+      departements:
+        description: Départements, séparés par des virgules, ou « metropole » (les 96 de France métropolitaine)
+        default: "35"
+      limite:
+        description: Nombre maximal d'établissements cherchés
+        default: "3000"
+      duree:
+        description: Durée maximale de la recherche, en minutes (la lecture des sites trouvés suit, 30 minutes au plus)
+        default: "100"
+      lire:
+        description: Lire ensuite les sites trouvés (adresses e-mail)
+        type: choice
+        options: ["oui", "non"]
+        default: "oui"
+
+concurrency:
+  group: prospection-d1
+  cancel-in-progress: false
+
+jobs:
+  recherche:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    permissions:
+      contents: read
+    env:
+      DEPARTEMENTS: ${{ inputs.departements }}
+      LIMITE: ${{ inputs.limite }}
+      DUREE: ${{ inputs.duree }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID || secrets.R2_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      D1_DATABASE_ID: 73f04a92-a485-4f65-8fae-0eebc15b850b
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_PROSPECTS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_PROSPECTS_SECRET_ACCESS_KEY }}
+      R2_ENDPOINT: https://${{ vars.R2_ACCOUNT_ID || secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+      R2_BUCKET: franceresto-prospects
+      BASE_FICHIER: ${{ github.workspace }}/prospects.sqlite
+      RESUME_RECHERCHE: ${{ github.workspace }}/resume-recherche.json
+      RESUME_SITES: ${{ github.workspace }}/resume-sites.json
+      RESUME_SYNCHRO: ${{ github.workspace }}/resume-synchro.json
+    steps:
+      - name: Contrôles
+        run: |
+          echo "$DEPARTEMENTS" | grep -Eq '^ *(metropole|2[AB]|[0-9]{2,3})( *, *(2[AB]|[0-9]{2,3}))* *$' \
+            || { echo "::error::Départements invalides : $DEPARTEMENTS"; exit 1; }
+          echo "$LIMITE" | grep -Eq '^[0-9]{1,6}$' || { echo "::error::Limite invalide : $LIMITE"; exit 1; }
+          echo "$DUREE" | grep -Eq '^[0-9]{1,3}$' && [ "$DUREE" -le 240 ] || { echo "::error::Durée invalide (240 minutes au plus) : $DUREE"; exit 1; }
+          [ -n "$CLOUDFLARE_API_TOKEN" ] && [ -n "$CLOUDFLARE_ACCOUNT_ID" ] \
+            || { echo "::error::CLOUDFLARE_API_TOKEN ou R2_ACCOUNT_ID manquant"; exit 1; }
+          [ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$AWS_SECRET_ACCESS_KEY" ] \
+            || { echo "::error::R2_PROSPECTS_ACCESS_KEY_ID ou R2_PROSPECTS_SECRET_ACCESS_KEY manquant"; exit 1; }
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Dépendances
+        run: pip install --quiet "httpx==0.28.1" "dnspython==2.9.0" "requests==2.32.5" "boto3==1.43.118"
+
+      - name: Fichier de travail (R2), puis campagnes, envois et exclusions de D1
+        run: |
+          python scripts/fichier_r2.py recuperer
+          RESUME="$RESUME_SYNCHRO" python scripts/synchro_d1.py tirer
+
+      - name: Recherche des sites
+        run: RESUME="$RESUME_RECHERCHE" DUREE_MAX=$((DUREE * 60)) python scripts/rechercher_sites.py
+
+      - name: Lecture des sites trouvés
+        if: ${{ inputs.lire == 'oui' }}
+        run: RESUME="$RESUME_SITES" LIMITE=20000 DUREE_MAX=1800 python scripts/lire_sites.py
+
+      - name: Fichier de travail renvoyé sur R2, puis synchronisation vers D1
+        run: |
+          python scripts/fichier_r2.py envoyer
+          RESUME="$RESUME_SYNCHRO" python scripts/synchro_d1.py pousser
+
+      - name: Résumé
+        if: always()
+        run: |
+          for f in "Recherche des sites:$RESUME_RECHERCHE" "Lecture des sites:$RESUME_SITES" "Synchronisation D1:$RESUME_SYNCHRO"; do
+            titre="${f%%:*}"; fichier="${f#*:}"
+            [ -f "$fichier" ] || continue
+            { echo "### $titre ($DEPARTEMENTS)"; echo '```json'; cat "$fichier"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          done

@@ -1,0 +1,8 @@
+__pycache__/
+*.sqlite
+*.sqlite.gz
+*.parquet
+*.pbf
+*.csv
+donnees/
+resume*.json
