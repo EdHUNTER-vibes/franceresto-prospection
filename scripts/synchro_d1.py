@@ -22,7 +22,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
-from commun import D1, Fichier, maintenant  # noqa: E402
+from commun import D1, Fichier, QuotaD1, maintenant  # noqa: E402
 
 STATUTS_ENVOI = ("bounce", "desinscrit", "plainte")
 # (table, clé, lignes du fichier à mettre dans D1, mode) ; « miroir » : ajout, modification, suppression ;
@@ -124,6 +124,10 @@ def pousser(fichier: Fichier, d1: D1, budget: int) -> dict:
         resume["complet"] = True
     except BudgetAtteint:
         print(f"Budget de {budget} lignes écrites atteint : la suite au prochain passage")
+    except QuotaD1:
+        # Le fichier de travail est déjà enregistré sur R2 : la synchronisation de nuit reprendra.
+        resume["quota_d1_atteint"] = True
+        print("Limite quotidienne d'écritures de D1 atteinte : la synchronisation de nuit reprendra")
     resume["lignes_ecrites_d1"] = d1.lignes_ecrites
     return resume
 
@@ -137,7 +141,10 @@ def principal():
         resume = tirer(fichier, d1)
     else:
         resume = pousser(fichier, d1, int(os.environ.get("BUDGET", "60000")))
-        d1.journal("synchro_d1", resume)
+        try:
+            d1.journal("synchro_d1", resume)
+        except QuotaD1:
+            pass
     fichier.journal(f"synchro_d1_{action}", resume)
     print(json.dumps(resume, ensure_ascii=False, indent=1))
     if os.environ.get("RESUME"):

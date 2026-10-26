@@ -14,7 +14,16 @@ on:
         default: "35"
       limite:
         description: Nombre maximal de sites lus (le passage s'arrête de toute façon après 45 minutes)
-        default: "400"
+        default: "50000"
+      enchainer:
+        description: Relancer un passage tant qu'il reste des sites à lire
+        type: choice
+        options: ["oui", "non"]
+        default: "oui"
+
+permissions:
+  contents: read
+  actions: write  # relance du passage suivant (« enchaîner »)
 
 concurrency:
   group: prospection-d1
@@ -26,6 +35,7 @@ jobs:
     timeout-minutes: 80
     permissions:
       contents: read
+      actions: write
     env:
       DEPARTEMENTS: ${{ inputs.departements }}
       LIMITE: ${{ inputs.limite }}
@@ -79,4 +89,17 @@ jobs:
           { echo "### Lecture des sites ($DEPARTEMENTS)"; echo '```json'; cat "$RESUME"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           if [ -f "$RESUME_SYNCHRO" ]; then
             { echo "### Synchronisation D1"; echo '```json'; cat "$RESUME_SYNCHRO"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Passage suivant (s'il reste du travail)
+        if: ${{ success() && inputs.enchainer == 'oui' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [ -f "$RESUME" ] || exit 0
+          restants=$(python -c "import json; print(json.load(open('$RESUME'))['restants'])")
+          faits=$(python -c "import json; print(json.load(open('$RESUME'))['sites_lus'])")
+          echo "Restants : $restants (faits dans ce passage : $faits)"
+          if [ "$restants" -gt 0 ] && [ "$faits" -gt 0 ]; then
+            gh workflow run sites.yml --ref "$GITHUB_REF_NAME" -f departements="$DEPARTEMENTS" -f limite="$LIMITE" -f enchainer=oui
           fi
