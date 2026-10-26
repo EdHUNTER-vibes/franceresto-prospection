@@ -1,0 +1,71 @@
+# Prospection : synchronisation du fichier de travail (bucket R2 privé « franceresto-prospects ») avec la
+# base D1 « franceresto-prospects ». Chaque nuit, elle reprend ce qu'un passage précédent n'a pas pu écrire
+# (budget d'écritures atteint) et récupère dans le fichier les campagnes, envois et exclusions de D1.
+# Le premier lancement crée le fichier à partir de D1. Voir le README.
+# Secrets : CLOUDFLARE_API_TOKEN (« D1 : Edit »), R2_PROSPECTS_ACCESS_KEY_ID, R2_PROSPECTS_SECRET_ACCESS_KEY ;
+# variable ou secret R2_ACCOUNT_ID.
+name: Prospection – synchronisation D1
+
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+    inputs:
+      budget:
+        description: "Nombre maximal de lignes écrites dans D1 (offre gratuite : 100 000 par jour)"
+        default: "60000"
+
+concurrency:
+  group: prospection-d1
+  cancel-in-progress: false
+
+jobs:
+  synchro:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      BUDGET: ${{ inputs.budget || '60000' }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID || secrets.R2_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      D1_DATABASE_ID: 73f04a92-a485-4f65-8fae-0eebc15b850b
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_PROSPECTS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_PROSPECTS_SECRET_ACCESS_KEY }}
+      R2_ENDPOINT: https://${{ vars.R2_ACCOUNT_ID || secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+      R2_BUCKET: franceresto-prospects
+      BASE_FICHIER: ${{ github.workspace }}/prospects.sqlite
+      RESUME: ${{ github.workspace }}/resume-synchro.json
+    steps:
+      - name: Contrôles
+        run: |
+          echo "$BUDGET" | grep -Eq '^[0-9]{1,5}$' || { echo "::error::Budget invalide : $BUDGET"; exit 1; }
+          [ -n "$CLOUDFLARE_API_TOKEN" ] && [ -n "$CLOUDFLARE_ACCOUNT_ID" ] \
+            || { echo "::error::CLOUDFLARE_API_TOKEN ou R2_ACCOUNT_ID manquant"; exit 1; }
+          [ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$AWS_SECRET_ACCESS_KEY" ] \
+            || { echo "::error::R2_PROSPECTS_ACCESS_KEY_ID ou R2_PROSPECTS_SECRET_ACCESS_KEY manquant"; exit 1; }
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Dépendances
+        run: pip install --quiet "requests==2.32.5" "boto3==1.43.118"
+
+      - name: Fichier de travail (R2), puis campagnes, envois et exclusions de D1
+        run: |
+          python scripts/fichier_r2.py recuperer
+          python scripts/synchro_d1.py tirer
+
+      - name: Fichier de travail renvoyé sur R2, puis synchronisation vers D1
+        run: |
+          python scripts/fichier_r2.py envoyer
+          python scripts/synchro_d1.py pousser
+
+      - name: Résumé
+        if: always()
+        run: |
+          [ -f "$RESUME" ] || exit 0
+          { echo "### Synchronisation D1 (budget : $BUDGET)"; echo '```json'; cat "$RESUME"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

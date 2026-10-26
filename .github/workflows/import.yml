@@ -1,0 +1,180 @@
+# Prospection, étape 1 : établissements CHR (SIRENE + OpenStreetMap + DATAtourisme) d'un ou plusieurs
+# départements, écrits dans le fichier de travail (bucket R2 privé « franceresto-prospects »), puis
+# synchronisés vers la base D1 « franceresto-prospects » (établissements avec une adresse seulement).
+# Lecture de données publiques uniquement, aucun envoi. Voir le README.
+# Secrets : CLOUDFLARE_API_TOKEN (« D1 : Edit »), R2_PROSPECTS_ACCESS_KEY_ID, R2_PROSPECTS_SECRET_ACCESS_KEY
+# (jeton R2 limité au bucket) ; variable ou secret R2_ACCOUNT_ID.
+name: Prospection – import des établissements
+
+on:
+  workflow_dispatch:
+    inputs:
+      departements:
+        description: Départements, séparés par des virgules, ou « metropole » (les 96 de France métropolitaine)
+        default: "35"
+      regions_osm:
+        description: Régions Geofabrik couvrant ces départements (europe/france/…), séparées par des virgules, ou « france »
+        default: bretagne
+      regions_datatourisme:
+        description: Régions DATAtourisme (bre, pdl, ara, cvl, occ…), séparées par des virgules, ou « toutes »
+        default: bre
+      liste_seulement:
+        description: Seulement rattacher les listes externes (sans réimporter les établissements)
+        type: choice
+        options: ["non", "oui"]
+        default: "non"
+      ecrire:
+        description: Écrire (fichier de travail puis D1 ; sinon, résumé seulement)
+        type: choice
+        options: ["non", "oui"]
+        default: "non"
+
+concurrency:
+  group: prospection-d1
+  cancel-in-progress: false
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    env:
+      DEPARTEMENTS: ${{ inputs.departements }}
+      APERCU: ${{ inputs.ecrire == 'oui' && 'non' || 'oui' }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID || secrets.R2_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      D1_DATABASE_ID: 73f04a92-a485-4f65-8fae-0eebc15b850b
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_PROSPECTS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_PROSPECTS_SECRET_ACCESS_KEY }}
+      R2_ENDPOINT: https://${{ vars.R2_ACCOUNT_ID || secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+      R2_BUCKET: franceresto-prospects
+      BASE_FICHIER: ${{ github.workspace }}/prospects.sqlite
+      RESUME: ${{ github.workspace }}/resume.json
+      RESUME_LISTE: ${{ github.workspace }}/resume-liste.json
+      RESUME_SYNCHRO: ${{ github.workspace }}/resume-synchro.json
+    steps:
+      - name: Contrôles
+        run: |
+          echo "$DEPARTEMENTS" | grep -Eq '^ *(metropole|2[AB]|[0-9]{2,3})( *, *(2[AB]|[0-9]{2,3}))* *$' \
+            || { echo "::error::Départements invalides : $DEPARTEMENTS"; exit 1; }
+          if [ "$APERCU" = "non" ]; then
+            [ -n "$CLOUDFLARE_API_TOKEN" ] && [ -n "$CLOUDFLARE_ACCOUNT_ID" ] \
+              || { echo "::error::CLOUDFLARE_API_TOKEN ou R2_ACCOUNT_ID manquant"; exit 1; }
+            [ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$AWS_SECRET_ACCESS_KEY" ] \
+              || { echo "::error::R2_PROSPECTS_ACCESS_KEY_ID ou R2_PROSPECTS_SECRET_ACCESS_KEY manquant"; exit 1; }
+          fi
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Dépendances
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq osmium-tool aria2 > /dev/null
+          pip install --quiet "duckdb==2.0.0" "osmium==4.3.2" "pyproj==3.7.2" "requests==2.32.5" \
+            "httpx==0.28.1" "dnspython==2.9.0" "boto3==1.43.118"
+
+      - name: SIRENE (adresses du dernier stock publié sur data.gouv.fr)
+        if: ${{ inputs.liste_seulement != 'oui' }}
+        run: |
+          mkdir -p donnees
+          curl -fsS --retry 6 --retry-all-errors --retry-delay 10 -o sirene.json \
+            "https://www.data.gouv.fr/api/1/datasets/base-sirene-des-entreprises-et-de-leurs-etablissements-siren-siret/"
+          python - >> "$GITHUB_ENV" <<'EOF'
+          import json
+          for r in json.load(open("sirene.json"))["resources"]:
+              t = r["title"]
+              if r.get("format") == "parquet" and t.startswith("Sirene : Fichier StockEtablissement -"):
+                  print("SIRENE_ETAB=" + r["url"])
+              if r.get("format") == "parquet" and t.startswith("Sirene : Fichier StockUniteLegale -"):
+                  print("SIRENE_UL=" + r["url"])
+          EOF
+          grep -c '^SIRENE_' "$GITHUB_ENV" | grep -qx 2 || { echo "::error::Fichiers SIRENE introuvables"; exit 1; }
+
+      - name: SIRENE (téléchargement, reprise automatique si le serveur coupe)
+        if: ${{ inputs.liste_seulement != 'oui' }}
+        run: |
+          for f in ETAB UL; do
+            url_var="SIRENE_$f"; url="${!url_var}"
+            aria2c -q -x 8 -s 8 -c --max-tries=20 --retry-wait=10 --timeout=60 \
+              -d donnees -o "$f.parquet" "$url"
+            echo "SIRENE_$f=${{ github.workspace }}/donnees/$f.parquet" >> "$GITHUB_ENV"
+          done
+          ls -l donnees
+
+      - name: OpenStreetMap (Geofabrik), lieux CHR seulement
+        if: ${{ inputs.liste_seulement != 'oui' }}
+        run: |
+          fichiers=""
+          IFS=',' read -ra regions <<< "${{ inputs.regions_osm }}"
+          for r in "${regions[@]}"; do
+            r=$(echo "$r" | xargs)
+            echo "$r" | grep -Eq '^[a-z-]+$' || { echo "::error::Région invalide : $r"; exit 1; }
+            if [ "$r" = france ]; then url="https://download.geofabrik.de/europe/france-latest.osm.pbf"
+            else url="https://download.geofabrik.de/europe/france/$r-latest.osm.pbf"; fi
+            aria2c -q -x 4 -s 4 -c --max-tries=20 --retry-wait=10 -d donnees -o "$r.osm.pbf" "$url"
+            osmium tags-filter "donnees/$r.osm.pbf" \
+              nwr/amenity=restaurant,fast_food,cafe,bar,pub,biergarten,food_court,ice_cream \
+              nwr/tourism=hotel,motel,guest_house nwr/craft=caterer nwr/shop=catering \
+              -o "donnees/$r-chr.osm.pbf" --overwrite
+            rm "donnees/$r.osm.pbf"
+            fichiers="$fichiers,${{ github.workspace }}/donnees/$r-chr.osm.pbf"
+          done
+          echo "OSM_PBF=${fichiers#,}" >> "$GITHUB_ENV"
+
+      - name: DATAtourisme (fichiers régionaux publiés chaque jour sur data.gouv.fr)
+        if: ${{ inputs.liste_seulement != 'oui' }}
+        run: |
+          curl -fsS --retry 6 --retry-all-errors --retry-delay 10 -o datatourisme.json \
+            "https://www.data.gouv.fr/api/1/datasets/5b598be088ee387c0c353714/"
+          fichiers=""
+          regions_dt="${{ inputs.regions_datatourisme }}"
+          if [ "$regions_dt" = toutes ]; then
+            regions_dt=$(python -c "import json; print(','.join(sorted(x['title'][17:20] for x in json.load(open('datatourisme.json'))['resources'] if x['title'].startswith('datatourisme-reg-') and x['title'].endswith('.csv'))))")
+            echo "Régions DATAtourisme : $regions_dt"
+          fi
+          IFS=',' read -ra regions <<< "$regions_dt"
+          for r in "${regions[@]}"; do
+            r=$(echo "$r" | xargs)
+            [ -z "$r" ] && continue
+            echo "$r" | grep -Eq '^[a-z]{3}$' || { echo "::error::Région DATAtourisme invalide : $r"; exit 1; }
+            url=$(python -c "import json,sys; print(next(x['url'] for x in json.load(open('datatourisme.json'))['resources'] if x['title'] == f'datatourisme-reg-{sys.argv[1]}.csv'))" "$r")
+            aria2c -q -x 4 -s 4 -c --max-tries=20 --retry-wait=10 -d donnees -o "dt-$r.csv" "$url"
+            fichiers="$fichiers,${{ github.workspace }}/donnees/dt-$r.csv"
+          done
+          echo "DATATOURISME_CSV=${fichiers#,}" >> "$GITHUB_ENV"
+
+      - name: Fichier de travail (R2), puis campagnes, envois et exclusions de D1
+        if: ${{ inputs.ecrire == 'oui' }}
+        run: |
+          python scripts/fichier_r2.py recuperer
+          RESUME="$RESUME_SYNCHRO" python scripts/synchro_d1.py tirer
+
+      - name: Import
+        if: ${{ inputs.liste_seulement != 'oui' }}
+        run: python scripts/import_etablissements.py
+
+      - name: Rattacher les listes externes (adresses de ces départements)
+        if: ${{ inputs.ecrire == 'oui' }}
+        run: python scripts/rattacher_liste.py
+
+      - name: Fichier de travail renvoyé sur R2, puis synchronisation vers D1
+        if: ${{ inputs.ecrire == 'oui' }}
+        run: |
+          python scripts/fichier_r2.py envoyer
+          RESUME="$RESUME_SYNCHRO" python scripts/synchro_d1.py pousser
+
+      - name: Résumé
+        if: always()
+        run: |
+          [ -f "$RESUME" ] || exit 0
+          { echo "### Import ($DEPARTEMENTS, écriture : ${{ inputs.ecrire }})"; echo '```json'; cat "$RESUME"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          if [ -f "$RESUME_LISTE" ]; then
+            { echo "### Listes externes"; echo '```json'; cat "$RESUME_LISTE"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f "$RESUME_SYNCHRO" ]; then
+            { echo "### Synchronisation D1"; echo '```json'; cat "$RESUME_SYNCHRO"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
