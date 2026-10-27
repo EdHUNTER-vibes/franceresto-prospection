@@ -12,14 +12,18 @@ D1 ne garde que ce qui sert aux envois, pour rester loin de la limite gratuite d
 - `pousser` (fichier → D1, après) : seulement les lignes nouvelles ou modifiées, et la suppression de
   ce qui n'a plus sa place dans D1 (origines retirées, établissements sans adresse). Arrêt quand le
   budget d'écritures du passage (BUDGET, 60 000 par défaut) est atteint : le passage suivant reprend.
+  Le budget est aussi limité par un plafond commun à tous les passages du jour (PLAFOND_JOUR, 75 000
+  par défaut, compté dans le journal de D1) : le reste de la limite de 100 000 est gardé pour les
+  envois et le back-office (enregistrement des campagnes, des envois et des événements Brevo).
 
-Variables : BASE_FICHIER, BUDGET, RESUME ; celles de D1 (D1_TEST : autre fichier SQLite à la place
+Variables : BASE_FICHIER, BUDGET, PLAFOND_JOUR, RESUME ; celles de D1 (D1_TEST : autre fichier SQLite à la place
 de D1, pour les essais).
 """
 
 import json
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(__file__))
 from commun import D1, Fichier, QuotaD1, maintenant  # noqa: E402
@@ -95,8 +99,24 @@ def tirer(fichier: Fichier, d1: D1) -> dict:
     return resume
 
 
-def pousser(fichier: Fichier, d1: D1, budget: int) -> dict:
+def ecrites_aujourdhui(d1: D1) -> int:
+    """Lignes écrites dans D1 depuis minuit UTC par les synchronisations (journal de D1)."""
+    minuit = time.strftime("%Y-%m-%dT00:00:00Z", time.gmtime())
+    return int(d1.requete("SELECT coalesce(sum(json_extract(detail, '$.lignes_ecrites_d1')), 0) AS n FROM journal "
+                          "WHERE tache = 'synchro_d1' AND date >= ?", [minuit])[0]["n"])
+
+
+def pousser(fichier: Fichier, d1: D1, budget: int, plafond_jour: int | None = None) -> dict:
     resume, voulu = {"complet": False}, {}
+    if plafond_jour is not None:
+        deja = ecrites_aujourdhui(d1)
+        resume["deja_ecrites_aujourdhui"] = deja
+        budget = min(budget, plafond_jour - deja)
+        if budget <= 0:
+            resume["plafond_jour_atteint"] = True
+            resume["lignes_ecrites_d1"] = 0
+            print(f"Plafond du jour ({plafond_jour} lignes) atteint : la suite après minuit (UTC)")
+            return resume
     try:
         for table, cles, requete, mode in TABLES:
             colonnes = colonnes_de(fichier, table)
@@ -140,7 +160,8 @@ def principal():
     if action == "tirer":
         resume = tirer(fichier, d1)
     else:
-        resume = pousser(fichier, d1, int(os.environ.get("BUDGET", "60000")))
+        resume = pousser(fichier, d1, int(os.environ.get("BUDGET", "60000")),
+                         int(os.environ.get("PLAFOND_JOUR", "75000")))
         try:
             d1.journal("synchro_d1", resume)
         except QuotaD1:

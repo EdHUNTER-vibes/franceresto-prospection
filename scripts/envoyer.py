@@ -35,7 +35,7 @@ from zoneinfo import ZoneInfo
 import requests
 
 sys.path.insert(0, os.path.dirname(__file__))
-from commun import D1, Fichier, maintenant, sql_texte  # noqa: E402
+from commun import D1, Fichier, QuotaD1, maintenant, sql_texte  # noqa: E402
 
 PARIS = ZoneInfo("Europe/Paris")
 PASSAGE_MIN = 30  # minutes entre deux passages du workflow
@@ -296,16 +296,37 @@ def principal():
             f = next((f for f in fournisseurs if f["reste"] > 0), None)
             if f is None:
                 break
+            # Envoi inscrit AVANT l'appel au service : si D1 refuse l'écriture (limite du jour),
+            # rien n'est envoyé, et une adresse envoyée n'est jamais renvoyée au passage suivant.
+            try:
+                inscrit = d1.requete(
+                    "INSERT INTO envois (campagne_id, email, siret, etape, envoye_le, statut, fournisseur) "
+                    "VALUES (?, ?, ?, 1, ?, 'envoye', ?) ON CONFLICT (campagne_id, email, etape) DO NOTHING "
+                    "RETURNING email", [c["id"], d["email"], d["siret"], horodatage, f["nom"]])
+            except QuotaD1:
+                resume["quota_d1_atteint"] = True
+                break
+            if not inscrit:  # déjà contactée par cette campagne
+                continue
             try:
                 message_id = ENVOI[f["type"]](f, c, d, message)
             except Exception as erreur:  # une adresse refusée ne bloque pas les suivantes
                 etat["erreurs"].append(str(erreur)[:200])
+                try:  # non envoyé : l'adresse redevient disponible
+                    d1.requete("DELETE FROM envois WHERE campagne_id = ? AND email = ? AND etape = 1", [c["id"], d["email"]])
+                except QuotaD1:
+                    resume["quota_d1_atteint"] = True
+                    break
                 if len(etat["erreurs"]) >= 5:
                     break
                 continue
-            d1.requete("INSERT INTO envois (campagne_id, email, siret, etape, envoye_le, message_id, statut, fournisseur) "
-                       "VALUES (?, ?, ?, 1, ?, ?, 'envoye', ?) ON CONFLICT (campagne_id, email, etape) DO NOTHING",
-                       [c["id"], d["email"], d["siret"], horodatage, message_id, f["nom"]])
+            try:  # identifiant du message, pour rattacher les événements de Brevo (délivré, ouvert…)
+                d1.requete("UPDATE envois SET message_id = ? WHERE campagne_id = ? AND email = ? AND etape = 1",
+                           [message_id, c["id"], d["email"]])
+            except QuotaD1:
+                resume["quota_d1_atteint"] = True
+                etat["envoyes"] += 1
+                break
             f["reste"] -= 1
             etat["envoyes"] += 1
             time.sleep(0.5)
@@ -314,7 +335,10 @@ def principal():
         with open(os.environ["RESUME"], "w") as f:
             json.dump(resume, f, ensure_ascii=False, indent=1)
     if not apercu and any(e["envoyes"] or e["erreurs"] for e in resume["campagnes"].values()):
-        d1.journal("envois", resume)
+        try:
+            d1.journal("envois", resume)
+        except QuotaD1:
+            pass
 
 
 if __name__ == "__main__":
