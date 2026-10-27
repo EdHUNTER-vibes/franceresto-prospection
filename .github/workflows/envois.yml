@@ -3,6 +3,7 @@
 # dans son quota du jour, réparti sur la journée. Lit et écrit seulement D1 (pas le fichier de travail).
 # Secrets : CLOUDFLARE_API_TOKEN, BREVO_API_KEY, LIEN_SECRET (signature des liens de désinscription) ;
 # variable ou secret R2_ACCOUNT_ID.
+# Lancement programmé : heure UTC (6 h – 17 h UTC couvre les plages de 9 h à 17 h 30, heure de Paris).
 name: Prospection – envois
 
 on:
