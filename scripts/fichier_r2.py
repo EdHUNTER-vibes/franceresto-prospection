@@ -27,7 +27,7 @@ from commun import D1  # noqa: E402
 
 CLE = "prospects.sqlite.gz"
 JOURS = ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"]
-SCHEMAS = ["0001_schema.sql", "0002_listes_externes.sql", "0003_recherche_sites.sql"]
+SCHEMAS = ["0001_schema.sql", "0002_listes_externes.sql", "0003_recherche_sites.sql", "0004_campagnes_envois.sql"]
 DOSSIER_SCHEMAS = os.path.join(os.path.dirname(__file__), "..", "d1")
 TABLES = ["etablissements", "emails", "email_sources", "exclusions", "campagnes", "envois", "journal",
           "listes_externes"]
@@ -40,11 +40,30 @@ def client_r2():
         config=Config(request_checksum_calculation="when_required", response_checksum_validation="when_required"))
 
 
+def instructions(sql: str) -> list[str]:
+    """Instructions SQL d'un fichier, une par une."""
+    liste, courante = [], ""
+    for ligne in sql.splitlines(keepends=True):
+        courante += ligne
+        if sqlite3.complete_statement(courante):
+            if courante.strip():
+                liste.append(courante.strip())
+            courante = ""
+    return liste
+
+
 def appliquer_schema(chemin: str):
+    """Schéma rejouable : une colonne déjà ajoutée (ALTER TABLE … ADD COLUMN) est ignorée."""
     connexion = sqlite3.connect(chemin)
     for nom in SCHEMAS:
         with open(os.path.join(DOSSIER_SCHEMAS, nom)) as f:
-            connexion.executescript(f.read())
+            for instruction in instructions(f.read()):
+                try:
+                    connexion.execute(instruction)
+                except sqlite3.OperationalError as e:
+                    if "duplicate column name" not in str(e):
+                        raise
+    connexion.commit()
     connexion.close()
 
 

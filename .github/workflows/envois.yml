@@ -1,0 +1,69 @@
+# Envoi des campagnes de prospection réglées depuis le back-office (scripts/envoyer.py) : toutes les
+# 30 minutes en semaine ; chaque campagne n'envoie que dans ses plages horaires (heure de Paris) et
+# dans son quota du jour, réparti sur la journée. Lit et écrit seulement D1 (pas le fichier de travail).
+# Secrets : CLOUDFLARE_API_TOKEN, BREVO_API_KEY, LIEN_SECRET (signature des liens de désinscription) ;
+# variable ou secret R2_ACCOUNT_ID.
+name: Prospection – envois
+
+on:
+  schedule:
+    - cron: "7,37 6-17 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      apercu:
+        description: Aperçu seulement (rien n'est envoyé)
+        type: choice
+        options: ["oui", "non"]
+        default: "oui"
+
+concurrency:
+  group: prospection-envois
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  envois:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      APERCU: ${{ inputs.apercu || 'non' }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID || secrets.R2_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      D1_DATABASE_ID: 73f04a92-a485-4f65-8fae-0eebc15b850b
+      BREVO_API_KEY: ${{ secrets.BREVO_API_KEY }}
+      LIEN_SECRET: ${{ secrets.LIEN_SECRET }}
+      DESINSCRIPTION_URL: https://franceresto.net/desinscription
+      FONCTION_URL: https://cywavulbqsipieoujwkp.supabase.co/functions/v1/prospection
+      RESUME: ${{ github.workspace }}/resume-envois.json
+    steps:
+      - name: Contrôles
+        run: |
+          [ -n "$CLOUDFLARE_API_TOKEN" ] && [ -n "$CLOUDFLARE_ACCOUNT_ID" ] \
+            || { echo "::error::CLOUDFLARE_API_TOKEN ou R2_ACCOUNT_ID manquant"; exit 1; }
+          if [ -z "$BREVO_API_KEY" ] || [ -z "$LIEN_SECRET" ]; then
+            echo "BREVO_API_KEY ou LIEN_SECRET absent : envois pas encore configurés"; echo "PRET=non" >> "$GITHUB_ENV"
+          fi
+
+      - uses: actions/checkout@v4
+        if: ${{ env.PRET != 'non' }}
+
+      - uses: actions/setup-python@v5
+        if: ${{ env.PRET != 'non' }}
+        with:
+          python-version: "3.12"
+
+      - name: Dépendances
+        if: ${{ env.PRET != 'non' }}
+        run: pip install --quiet "requests==2.32.5"
+
+      - name: Envois
+        if: ${{ env.PRET != 'non' }}
+        run: python scripts/envoyer.py
+
+      - name: Résumé
+        if: always()
+        run: |
+          [ -f "$RESUME" ] || exit 0
+          { echo "### Envois (aperçu : $APERCU)"; echo '```json'; cat "$RESUME"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

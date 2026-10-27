@@ -53,9 +53,22 @@ Tous les traitements partagent la file `prospection-d1` : ils ne tournent jamais
 
 **Limite de D1** : si la limite quotidienne d'écritures de D1 est atteinte, le traitement s'arrête proprement. Le fichier est déjà enregistré sur R2, et la synchronisation de nuit reprend.
 
+**Envois** (`scripts/envoyer.py`, workflow `envois`, toutes les 30 minutes en semaine) :
+- Les campagnes sont réglées depuis le back-office de France Resto.
+- Chacune n'envoie que dans ses plages horaires (heure de Paris). Par défaut, ce sont celles où les établissements ne sont pas en service : 9 h 30–11 h et 15 h–17 h 30.
+- Le quota du jour est réparti sur la journée.
+- Les services d'envoi sont utilisés dans leur quota quotidien (table `fournisseurs`).
+- Aucun envoi :
+  - aux inscrits France Resto ;
+  - aux désinscrits ;
+  - aux adresses en erreur ;
+  - aux adresses déjà contactées.
+- Chaque e-mail indique l'identité de l'expéditeur, l'origine de l'adresse et un lien de désinscription (un clic, RFC 8058).
+
 **Secrets** :
 - `CLOUDFLARE_API_TOKEN` (D1 : modifier) ;
 - `R2_PROSPECTS_ACCESS_KEY_ID` et `R2_PROSPECTS_SECRET_ACCESS_KEY` (jeton R2 limité au bucket) ;
-- `R2_ACCOUNT_ID`, en variable ou en secret.
+- `R2_ACCOUNT_ID`, en variable ou en secret ;
+- envois : `BREVO_API_KEY`, `LIEN_SECRET` (signature des liens de désinscription, partagée avec l'Edge Function `prospection`).
 
 **Restaurer une archive** : télécharger `archives/prospects-<jour>.sqlite.gz` depuis le bucket, puis le déposer sous le nom `prospects.sqlite.gz`.
