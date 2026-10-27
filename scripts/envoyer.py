@@ -28,6 +28,7 @@ import re
 import sys
 import time
 from base64 import urlsafe_b64encode
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -118,6 +119,29 @@ def joli(texte: str | None) -> str:
     return texte
 
 
+SITE = "https://franceresto.net"
+RE_LIEN_SITE = re.compile(r"https://(?:www\.)?franceresto\.net(?:[/?#][^\s\"'<>)]*)?")
+RE_HREF_SITE = re.compile(r'href="(https://(?:www\.)?franceresto\.net(?:[/?#][^"]*)?)"')
+
+
+def avec_utm(url: str, campagne: dict) -> str:
+    """Lien vers le site avec le suivi de la campagne (paramètres UTM déjà présents conservés)."""
+    morceaux = urlsplit(url)
+    if not morceaux.path:
+        morceaux = morceaux._replace(path="/")
+    params = dict(parse_qsl(morceaux.query, keep_blank_values=True))
+    params.setdefault("utm_source", "prospection")
+    params.setdefault("utm_medium", "email")
+    params.setdefault("utm_campaign", campagne.get("code") or f"campagne-{campagne['id']}")
+    return urlunsplit(morceaux._replace(query=urlencode(params)))
+
+
+def suivi_texte(url: str, campagne: dict) -> str:
+    """Adresse écrite dans la version texte : la ponctuation qui la suit n'en fait pas partie."""
+    fin = re.search(r"[.,;:!?]+$", url)
+    return avec_utm(url[:fin.start()], campagne) + fin.group(0) if fin else avec_utm(url, campagne)
+
+
 def rendre(gabarit: str | None, valeurs: dict, en_html: bool) -> str:
     def remplacer(m):
         v = valeurs.get(m.group(1), "")
@@ -128,7 +152,9 @@ def rendre(gabarit: str | None, valeurs: dict, en_html: bool) -> str:
 def composer(campagne: dict, d: dict) -> dict:
     specialites = json.loads(d.get("specialites") or "[]")
     valeurs = {"etablissement": joli(d["nom"]) or "votre établissement", "commune": joli(d["commune"]),
-               "specialite": next((SPECIALITES[s] for s in specialites if s in SPECIALITES), "")}
+               "specialite": next((SPECIALITES[s] for s in specialites if s in SPECIALITES), ""),
+               # {{lien}} : page d'arrivée suivie ; {{lien_affiche}} : la même, sans suivi (texte du lien)
+               "lien": avec_utm(campagne.get("lien") or SITE, campagne), "lien_affiche": campagne.get("lien") or SITE}
     page, un_clic = liens_desinscription(d["email"])
     origine = SOURCES.get(d["source"], "une source publique")
     if d["source"] == "site" and d.get("url"):
@@ -140,7 +166,12 @@ def composer(campagne: dict, d: dict) -> dict:
                  f'Vous recevez ce message car l\'adresse {html.escape(d["email"])} est publiée sur '
                  f'{html.escape(origine)}.<br><a href="{html.escape(page)}">Ne plus recevoir nos messages</a></p>')
     corps_html = rendre(campagne["contenu_html"], valeurs, True)
-    corps_texte = rendre(campagne["contenu_texte"], valeurs, False) or re.sub(r"<[^>]+>", "", corps_html)
+    corps_texte = rendre(campagne["contenu_texte"], valeurs, False) or html.unescape(re.sub(r"<[^>]+>", "", corps_html))
+    # Liens vers le site suivis par campagne : cibles des liens HTML (le texte affiché reste lisible) et
+    # adresses de la version texte ; le pied de page, ajouté ensuite, n'est pas concerné
+    corps_html = RE_HREF_SITE.sub(
+        lambda m: f'href="{html.escape(avec_utm(html.unescape(m.group(1)), campagne))}"', corps_html)
+    corps_texte = RE_LIEN_SITE.sub(lambda m: suivi_texte(m.group(0), campagne), corps_texte)
     return {
         "objet": rendre(campagne["objet"], valeurs, False),
         "html": f'<div style="font-family:Arial,sans-serif;font-size:15px;line-height:1.6">{corps_html}{pied_html}</div>',
