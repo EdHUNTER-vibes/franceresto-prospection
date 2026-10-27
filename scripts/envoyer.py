@@ -168,6 +168,11 @@ def envoyer_brevo(fournisseur: dict, campagne: dict, d: dict, message: dict) -> 
 ENVOI = {"brevo": envoyer_brevo}
 
 
+def utilise_commune(campagne: dict) -> bool:
+    return any(re.search(r"\{\{\s*commune\s*\}\}", campagne.get(k) or "")
+               for k in ("objet", "contenu_html", "contenu_texte"))
+
+
 def destinataires(d1: D1, campagne: dict, n: int) -> list[dict]:
     """n destinataires au plus, tirés au hasard dans la cible de la campagne."""
     zone = json.loads(campagne["zone"] or "{}")
@@ -176,6 +181,9 @@ def destinataires(d1: D1, campagne: dict, n: int) -> list[dict]:
                   "NOT EXISTS (SELECT 1 FROM envois v WHERE v.email = m.email)"]
     if not campagne["nominatifs"]:
         conditions.append("m.type = 'generique'")
+    if utilise_commune(campagne):
+        # Message qui cite la commune : jamais de « à . » (fiches provisoires des listes externes, sans commune)
+        conditions.append("coalesce(e.commune, '') <> ''")
     departements = [d for d in zone.get("departements", []) if RE_DEPARTEMENT.match(d)]
     if departements:
         conditions.append(f"e.departement IN ({', '.join(sql_texte(d) for d in departements)})")
