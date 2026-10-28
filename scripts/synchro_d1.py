@@ -26,7 +26,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(__file__))
-from commun import D1, Fichier, QuotaD1, maintenant  # noqa: E402
+from commun import D1, Fichier, QuotaD1, maintenant, marquer_chaines  # noqa: E402
 
 STATUTS_ENVOI = ("bounce", "desinscrit", "plainte")
 # (table, clé, lignes du fichier à mettre dans D1, mode) ; « miroir » : ajout, modification, suppression ;
@@ -117,6 +117,8 @@ def pousser(fichier: Fichier, d1: D1, budget: int, plafond_jour: int | None = No
             resume["lignes_ecrites_d1"] = 0
             print(f"Plafond du jour ({plafond_jour} lignes) atteint : la suite après minuit (UTC)")
             return resume
+    # Adresses de chaînes et de réseaux (siège, centrale de réservation) écartées avant l'envoi vers D1
+    resume["adresses_chaines"] = marquer_chaines(fichier)
     try:
         for table, cles, requete, mode in TABLES:
             colonnes = colonnes_de(fichier, table)

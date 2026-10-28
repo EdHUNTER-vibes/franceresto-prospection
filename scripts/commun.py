@@ -38,6 +38,39 @@ DOMAINES_EXCLUS = {
     "pagesjaunes.fr", "solocal.com", "booking.com", "expedia.com", "sumup.com", "eatbu.com",
     "dish.co", "metro.fr", "wix.com", "jimdo.com", "squarespace.com", "shopify.com",
 }
+# Réseaux et chaînes : leurs adresses sont celles du siège ou d'une centrale de réservation, pas de
+# l'établissement (ex. assistance.reservation@accor.com pour un hôtel ibis franchisé). Un domaine
+# rattaché à au moins SEUIL_CHAINE établissements est traité de même (marquer_chaines).
+DOMAINES_CHAINES = {
+    "accor.com", "accorhotels.com", "ibis.com", "novotel.com", "mercure.com", "sofitel.com", "pullman.com",
+    "bestwestern.fr", "bestwestern.com", "marriott.com", "hilton.com", "ihg.com", "hyatt.com",
+    "radissonhotels.com", "choicehotels.com", "wyndham.com", "louvrehotels.com", "campanile.com",
+    "kyriad.com", "premiereclasse.com", "hotel-bb.com", "hotelf1.com", "logishotels.com", "logis-hotels.com",
+    "brithotel.fr", "contact-hotel.com", "the-originals-hotels.com", "appartcity.com", "adagio-city.com",
+    "mcdonalds.fr", "mcdonalds.com", "burgerking.fr", "kfc.fr", "quick.fr", "subway.com", "dominos.fr",
+    "pizzahut.fr", "buffalo-grill.fr", "courtepaille.com", "hippopotamus.fr", "flunch.fr", "del-arte.fr",
+    "leon-de-bruxelles.fr", "bistro-regent.fr", "paul.fr", "briochedoree.fr", "brioche-doree.fr",
+    "starbucks.fr", "otacos.com", "o-tacos.com", "pomdepain.fr", "columbuscafe.com", "cojean.fr",
+    "sodexo.com", "elior.com", "elior.fr", "compass-group.fr", "api-restauration.fr", "groupe-bertrand.com",
+}
+SEUIL_CHAINE = 5
+
+
+def marquer_chaines(base: "D1") -> int:
+    """Adresses (hors messageries) d'une chaîne ou d'un réseau → « invalide » : jamais ciblées."""
+    liste = ", ".join(sql_texte(d) for d in sorted(DOMAINES_CHAINES))
+    messageries = ", ".join(sql_texte(d) for d in sorted(MESSAGERIES))
+    avant = base.lignes_ecrites
+    base.requete(f"""
+        UPDATE emails SET statut = 'invalide'
+        WHERE statut IN ('a_verifier', 'valide') AND (
+          domaine IN ({liste})
+          OR domaine IN (SELECT m.domaine FROM emails m JOIN email_sources s ON s.email = m.email
+                         WHERE m.domaine NOT IN ({messageries})
+                         GROUP BY m.domaine HAVING count(DISTINCT s.siret) >= {SEUIL_CHAINE}))""")
+    return base.lignes_ecrites - avant
+
+
 # Sites qui ne sont pas « le site de l'établissement » (on ne les lit pas).
 SITES_PLATEFORMES = (
     "facebook.com", "fb.com", "instagram.com", "tripadvisor.", "thefork.", "lafourchette.",
