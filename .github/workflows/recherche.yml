@@ -118,3 +118,16 @@ jobs:
           if [ "$restants" -gt 0 ] && [ "$faits" -gt 0 ]; then
             gh workflow run recherche.yml --ref "$GITHUB_REF_NAME" -f departements="$DEPARTEMENTS" -f limite="$LIMITE" -f duree="$DUREE" -f lire="${{ inputs.lire }}" -f enchainer=oui
           fi
+
+      - name: Envois de la journée (s'ils ne tournent pas déjà)
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # Démarre les envois en semaine, de 6 h à 16 h UTC, si aucun lancement n'est en cours ou en attente
+          [ "$(date -u +%u)" -le 5 ] && [ "$(date -u +%H)" -ge 6 ] && [ "$(date -u +%H)" -lt 16 ] || exit 0
+          actifs=$(gh run list --workflow envois.yml --limit 20 --json status \
+            --jq '[.[] | select(.status != "completed")] | length')
+          echo "Envois en cours ou en attente : $actifs"
+          [ "$actifs" -eq 0 ] && gh workflow run envois.yml --ref "$GITHUB_REF_NAME" -f apercu=non -f journee=oui || true

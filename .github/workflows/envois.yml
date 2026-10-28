@@ -1,14 +1,18 @@
 # Envoi des campagnes de prospection réglées depuis le back-office (scripts/envoyer.py) : toutes les
 # 30 minutes en semaine ; chaque campagne n'envoie que dans ses plages horaires (heure de Paris) et
 # dans son quota du jour, réparti sur la journée. Lit et écrit seulement D1 (pas le fichier de travail).
+# Les lancements programmés de GitHub arrivent avec des heures de retard, voire jamais : un lancement
+# « journée » fait donc lui-même un passage à h07 et h37 jusqu'à 16 h 45 UTC, puis se relance s'il
+# atteint sa durée maximale avant. Il est démarré par le premier lancement programmé qui arrive, ou
+# par la recherche des sites (recherche.yml) en semaine s'il ne tourne pas déjà.
 # Secrets : CLOUDFLARE_API_TOKEN, BREVO_API_KEY, LIEN_SECRET (signature des liens de désinscription) ;
 # variable ou secret R2_ACCOUNT_ID.
-# Lancement programmé : heure UTC (6 h – 17 h UTC couvre les plages de 9 h à 17 h 30, heure de Paris).
+# Lancement programmé : heure UTC (6 h – 16 h 45 UTC couvre les plages de 9 h à 17 h 30, heure de Paris).
 name: Prospection – envois
 
 on:
   schedule:
-    - cron: "7,37 6-17 * * 1-5"
+    - cron: "7 6-15 * * 1-5"
   workflow_dispatch:
     inputs:
       apercu:
@@ -16,6 +20,11 @@ on:
         type: choice
         options: ["oui", "non"]
         default: "oui"
+      journee:
+        description: Passages toutes les 30 minutes jusqu'à la fin de la journée (16 h 45 UTC)
+        type: choice
+        options: ["oui", "non"]
+        default: "non"
 
 concurrency:
   group: prospection-envois
@@ -23,13 +32,15 @@ concurrency:
 
 permissions:
   contents: read
+  actions: write  # relance de la journée
 
 jobs:
   envois:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 350
     env:
       APERCU: ${{ inputs.apercu || 'non' }}
+      JOURNEE: ${{ github.event_name == 'schedule' && 'oui' || inputs.journee || 'non' }}
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID || secrets.R2_ACCOUNT_ID }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       D1_DATABASE_ID: 73f04a92-a485-4f65-8fae-0eebc15b850b
@@ -61,10 +72,28 @@ jobs:
 
       - name: Envois
         if: ${{ env.PRET != 'non' }}
-        run: python scripts/envoyer.py
-
-      - name: Résumé
-        if: always()
         run: |
-          [ -f "$RESUME" ] || exit 0
-          { echo "### Envois (aperçu : $APERCU)"; echo '```json'; cat "$RESUME"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          resume() {
+            [ -f "$RESUME" ] || return 0
+            { echo "### Envois $(date -u +%H:%M) UTC (aperçu : $APERCU)"; echo '```json'; cat "$RESUME"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            rm -f "$RESUME"
+          }
+          if [ "$JOURNEE" != "oui" ]; then python scripts/envoyer.py; resume; exit 0; fi
+          debut=$(date -u +%s)
+          fin_jour=$(date -u -d "today 16:45" +%s)
+          while :; do
+            python scripts/envoyer.py || echo "::warning::Passage en échec, nouvel essai au suivant"
+            resume
+            maintenant=$(date -u +%s)
+            prochain=$(( (maintenant - 420) / 1800 * 1800 + 420 + 1800 ))  # h07 ou h37 suivant
+            if [ "$prochain" -ge "$fin_jour" ]; then echo "Fin de la journée d'envois"; break; fi
+            if [ $(( prochain - debut )) -ge $(( 330 * 60 )) ]; then echo "RELANCER=oui" >> "$GITHUB_ENV"; break; fi
+            sleep $(( prochain - maintenant ))
+          done
+
+      - name: Suite de la journée
+        if: ${{ env.RELANCER == 'oui' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh workflow run envois.yml --ref "$GITHUB_REF_NAME" -f apercu="$APERCU" -f journee=oui
