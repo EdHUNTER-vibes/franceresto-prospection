@@ -56,6 +56,8 @@ SPECIALITES = {
     "creation_carte": "création de carte", "sommelier": "sommelier", "agence_communication": "agence de communication",
     "photographe_culinaire": "photographe culinaire", "seo": "référencement (SEO)", "site_web": "création de sites web",
     "formateur": "formateur", "ecole_hoteliere": "école hôtelière", "centre_formation": "centre de formation",
+    "consultant_chr": "consultant CHR", "logiciel_caisse": "logiciel de caisse", "immobilier_chr": "immobilier CHR",
+    "services_techniques": "services techniques",
 }
 SOURCES = {"osm": "OpenStreetMap", "datatourisme": "DATAtourisme (offices de tourisme)",
            "site": "votre site", "prompt": "un annuaire public", "manuel": "une source publique"}
