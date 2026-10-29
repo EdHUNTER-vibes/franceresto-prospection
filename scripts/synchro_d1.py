@@ -42,6 +42,8 @@ TABLES = [
     ("envois", ["campagne_id", "email", "etape"], "SELECT * FROM envois", "ajout"),
 ]
 SUPPRESSIONS = ["email_sources", "etablissements"]  # dans cet ordre (clés étrangères) ; jamais d'adresse
+# Pros de l'annuaire : importés dans D1 (pas dans le fichier), recopiés par `tirer`, jamais supprimés par `pousser`
+ANNUAIRE = "cible = 'annuaire'"
 LOT = 400
 
 
@@ -53,11 +55,11 @@ def ouvrir_d1() -> D1:
     return Fichier(os.environ["D1_TEST"]) if os.environ.get("D1_TEST") else D1()
 
 
-def lire_d1(d1: D1, table: str, colonnes: list[str]) -> list[dict]:
+def lire_d1(d1: D1, table: str, colonnes: list[str], filtre: str = "1") -> list[dict]:
     lignes, dernier = [], 0
     while True:
         page = d1.requete(f"SELECT rowid AS _r, {', '.join(colonnes)} FROM {table} "
-                          "WHERE rowid > ? ORDER BY rowid LIMIT 2000", [dernier])
+                          f"WHERE rowid > ? AND ({filtre}) ORDER BY rowid LIMIT 2000", [dernier])
         if not page:
             return lignes
         dernier = page[-1]["_r"]
@@ -96,6 +98,15 @@ def tirer(fichier: Fichier, d1: D1) -> dict:
     for s in statuts:
         fichier.requete("UPDATE emails SET statut = ? WHERE email = ?", [s["statut"], s["email"]])
     resume["statuts_envoi"] = len(statuts)
+    # Pros de l'annuaire : listes importées directement dans D1, qui en est la référence
+    for table, cles, filtre in (
+            ("etablissements", ["siret"], ANNUAIRE),
+            ("emails", ["email"], f"email IN (SELECT email FROM email_sources WHERE siret IN (SELECT siret FROM etablissements WHERE {ANNUAIRE}))"),
+            ("email_sources", ["email", "siret", "source"], f"siret IN (SELECT siret FROM etablissements WHERE {ANNUAIRE})")):
+        colonnes = colonnes_de(fichier, table)
+        lignes = [tuple(l[c] for c in colonnes) for l in lire_d1(d1, table, colonnes, filtre)]
+        ecrire(fichier, table, colonnes, cles, lignes, "miroir")
+        resume[f"annuaire_{table}"] = len(lignes)
     return resume
 
 
@@ -131,9 +142,11 @@ def pousser(fichier: Fichier, d1: D1, budget: int, plafond_jour: int | None = No
             voulu[table] = (cles, souhaite, actuel)
             resume[table] = {"fichier": len(souhaite), "d1": len(actuel), "ecrites": len(a_ecrire)}
             ecrire(d1, table, colonnes, cles, a_ecrire, mode, budget)
+        # Pros de l'annuaire ajoutés dans D1 après le `tirer` de ce passage : conservés
+        annuaire = {l["siret"] for l in lire_d1(d1, "etablissements", ["siret"], ANNUAIRE)}
         for table in SUPPRESSIONS:
             cles, souhaite, actuel = voulu[table]
-            en_trop = [k for k in actuel if k not in souhaite]
+            en_trop = [k for k in actuel if k not in souhaite and k[cles.index("siret")] not in annuaire]
             resume[table]["supprimees"] = len(en_trop)
             par = 90 // len(cles)  # D1 : 100 paramètres au plus par requête
             for i in range(0, len(en_trop), par):
