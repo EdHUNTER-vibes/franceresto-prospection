@@ -263,6 +263,16 @@ def principal():
         instant = datetime.fromisoformat(os.environ["INSTANT"]).astimezone(PARIS)
     debut = debut_du_jour_utc(instant)
     horodatage = instant.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Newsletter des inscrits en cours de diffusion (Edge Function admin, même quota Brevo) : pause
+    d1.requete("CREATE TABLE IF NOT EXISTS pauses (motif TEXT PRIMARY KEY, jusqu_au TEXT NOT NULL)")
+    pause = d1.requete("SELECT motif, jusqu_au FROM pauses WHERE jusqu_au > ?", [horodatage])
+    if pause and not apercu:
+        resume = {"instant": instant.isoformat(timespec="minutes"), "pause": pause}
+        print(json.dumps(resume, ensure_ascii=False, indent=1))
+        if os.environ.get("RESUME"):
+            with open(os.environ["RESUME"], "w") as f:
+                json.dump(resume, f, ensure_ascii=False, indent=1)
+        return
     fournisseurs = d1.requete("SELECT * FROM fournisseurs WHERE actif = 1 ORDER BY priorite, nom")
     for f in fournisseurs:
         deja = d1.requete("SELECT count(*) AS n FROM envois WHERE fournisseur = ? AND envoye_le >= ?", [f["nom"], debut])
