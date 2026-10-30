@@ -5,7 +5,8 @@
 # « journée » fait donc lui-même un passage à h07 et h37 jusqu'à 16 h 45 UTC, puis se relance s'il
 # atteint sa durée maximale avant. Il est démarré par le premier lancement programmé qui arrive, ou
 # par la recherche des sites (recherche.yml) en semaine s'il ne tourne pas déjà.
-# Secrets : CLOUDFLARE_API_TOKEN, BREVO_API_KEY, LIEN_SECRET (signature des liens de désinscription) ;
+# Secrets : CLOUDFLARE_API_TOKEN, LIEN_SECRET (signature des liens de désinscription), et ceux des services
+# d'envoi : BREVO_API_KEY ; AWS_SES_ACCESS_KEY_ID, AWS_SES_SECRET_ACCESS_KEY, AWS_SES_REGION (Amazon SES) ;
 # variable ou secret R2_ACCOUNT_ID.
 # Lancement programmé : heure UTC (6 h – 16 h 45 UTC couvre les plages de 9 h à 17 h 30, heure de Paris).
 name: Prospection – envois
@@ -45,6 +46,9 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       D1_DATABASE_ID: 73f04a92-a485-4f65-8fae-0eebc15b850b
       BREVO_API_KEY: ${{ secrets.BREVO_API_KEY }}
+      AWS_SES_ACCESS_KEY_ID: ${{ secrets.AWS_SES_ACCESS_KEY_ID }}
+      AWS_SES_SECRET_ACCESS_KEY: ${{ secrets.AWS_SES_SECRET_ACCESS_KEY }}
+      AWS_SES_REGION: ${{ secrets.AWS_SES_REGION || 'eu-north-1' }}
       LIEN_SECRET: ${{ secrets.LIEN_SECRET }}
       DESINSCRIPTION_URL: https://franceresto.net/desinscription
       FONCTION_URL: https://cywavulbqsipieoujwkp.supabase.co/functions/v1/prospection
@@ -54,8 +58,8 @@ jobs:
         run: |
           [ -n "$CLOUDFLARE_API_TOKEN" ] && [ -n "$CLOUDFLARE_ACCOUNT_ID" ] \
             || { echo "::error::CLOUDFLARE_API_TOKEN ou R2_ACCOUNT_ID manquant"; exit 1; }
-          if [ -z "$BREVO_API_KEY" ] || [ -z "$LIEN_SECRET" ]; then
-            echo "BREVO_API_KEY ou LIEN_SECRET absent : envois pas encore configurés"; echo "PRET=non" >> "$GITHUB_ENV"
+          if [ -z "$LIEN_SECRET" ] || { [ -z "$BREVO_API_KEY" ] && [ -z "$AWS_SES_ACCESS_KEY_ID" ]; }; then
+            echo "LIEN_SECRET ou clé d'un service d'envoi absent : envois pas encore configurés"; echo "PRET=non" >> "$GITHUB_ENV"
           fi
 
       - uses: actions/checkout@v4
@@ -68,7 +72,7 @@ jobs:
 
       - name: Dépendances
         if: ${{ env.PRET != 'non' }}
-        run: pip install --quiet "requests==2.32.5"
+        run: pip install --quiet "requests==2.32.5" "boto3==1.40.0"
 
       - name: Envois
         if: ${{ env.PRET != 'non' }}

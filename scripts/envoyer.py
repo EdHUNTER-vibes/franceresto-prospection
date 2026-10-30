@@ -12,7 +12,10 @@ et un lien de désinscription (en-têtes List-Unsubscribe et un clic, RFC 8058).
 Les services d'envoi (table `fournisseurs`) sont utilisés dans l'ordre de priorité, chacun dans
 son quota quotidien ; un service n'est activé qu'après l'accord écrit de l'hébergeur.
 
-Variables : celles de D1 ; BREVO_API_KEY ; LIEN_SECRET (signature des liens de désinscription) ;
+Services : Brevo (API transactionnelle) et Amazon SES (API v2, sans suivi des ouvertures ni des clics ; les
+événements remontent à la fonction `prospection` par Amazon SNS).
+
+Variables : celles de D1 ; BREVO_API_KEY ; AWS_SES_ACCESS_KEY_ID, AWS_SES_SECRET_ACCESS_KEY, AWS_SES_REGION ; LIEN_SECRET (signature des liens de désinscription) ;
 DESINSCRIPTION_URL (page du site) ; FONCTION_URL (désinscription en un clic) ;
 APERCU=oui : rien n'est envoyé ni écrit, résumé et premier e-mail affichés ; D1_TEST : fichier SQLite
 à la place de D1 (essais).
@@ -28,6 +31,7 @@ import re
 import sys
 import time
 from base64 import urlsafe_b64encode
+from email.utils import formataddr
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -63,7 +67,7 @@ SOURCES = {"osm": "OpenStreetMap", "datatourisme": "DATAtourisme (offices de tou
            "site": "votre site", "prompt": "un annuaire public", "manuel": "une source publique"}
 RE_DEPARTEMENT = re.compile(r"^(2[AB]|[0-9]{2,3})$")
 RE_CATEGORIE = re.compile(r"^[a-z_]{2,40}$")
-# Pendant la diffusion de la newsletter (même quota Brevo) : e-mails de prospection gardés par jour
+# Pendant la diffusion de la newsletter (même quota Brevo) : e-mails de prospection par Brevo gardés par jour
 PROSPECTION_PENDANT_NEWSLETTER = int(os.environ.get("PROSPECTION_PENDANT_NEWSLETTER", "30"))
 
 
@@ -200,7 +204,37 @@ def envoyer_brevo(fournisseur: dict, campagne: dict, d: dict, message: dict) -> 
     return r.json()["messageId"]
 
 
-ENVOI = {"brevo": envoyer_brevo}
+_ses = None
+
+
+def envoyer_ses(fournisseur: dict, campagne: dict, d: dict, message: dict) -> str:
+    """Amazon SES (API v2) : aucun pixel ni lien réécrit, adresse de rebond sur notre domaine (MAIL FROM)."""
+    global _ses
+    if _ses is None:
+        import boto3  # seulement quand un service SES est actif
+        _ses = boto3.client("sesv2", region_name=os.environ.get("AWS_SES_REGION", "eu-north-1"),
+                            aws_access_key_id=os.environ["AWS_SES_ACCESS_KEY_ID"],
+                            aws_secret_access_key=os.environ["AWS_SES_SECRET_ACCESS_KEY"])
+    corps = {
+        "FromEmailAddress": formataddr((campagne["expediteur_nom"] or "France Resto", fournisseur["expediteur"]), "utf-8"),
+        "Destination": {"ToAddresses": [d["email"]]},
+        "Content": {"Simple": {
+            "Subject": {"Data": message["objet"], "Charset": "UTF-8"},
+            "Body": {"Text": {"Data": message["texte"], "Charset": "UTF-8"},
+                     "Html": {"Data": message["html"], "Charset": "UTF-8"}},
+            "Headers": [{"Name": k, "Value": v} for k, v in message["entetes"].items()],
+        }},
+        "EmailTags": [{"Name": "campagne", "Value": re.sub(r"[^A-Za-z0-9_-]", "-", str(campagne["code"] or campagne["id"]))}],
+    }
+    if campagne["repondre_a"]:
+        corps["ReplyToAddresses"] = [campagne["repondre_a"]]
+    try:
+        return _ses.send_email(**corps)["MessageId"]
+    except Exception as erreur:
+        raise RuntimeError(f"SES : {erreur}") from None
+
+
+ENVOI = {"brevo": envoyer_brevo, "ses": envoyer_ses}
 
 
 def utilise_commune(campagne: dict) -> bool:
@@ -268,17 +302,21 @@ def principal():
     debut = debut_du_jour_utc(instant)
     horodatage = instant.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     # Newsletter des inscrits en cours de diffusion (Edge Function admin, même quota Brevo) : la prospection
-    # est limitée à PROSPECTION_PENDANT_NEWSLETTER e-mails par jour (30 par défaut), le reste va à la newsletter
+    # par Brevo est limitée à PROSPECTION_PENDANT_NEWSLETTER e-mails par jour (30 par défaut), le reste va à la
+    # newsletter ; les autres services (Amazon SES) ne partagent pas ce quota
     d1.requete("CREATE TABLE IF NOT EXISTS pauses (motif TEXT PRIMARY KEY, jusqu_au TEXT NOT NULL)")
     pause = d1.requete("SELECT motif, jusqu_au FROM pauses WHERE jusqu_au > ?", [horodatage])
     fournisseurs = d1.requete("SELECT * FROM fournisseurs WHERE actif = 1 ORDER BY priorite, nom")
     for f in fournisseurs:
         deja = d1.requete("SELECT count(*) AS n FROM envois WHERE fournisseur = ? AND envoye_le >= ?", [f["nom"], debut])
         f["reste"] = max(0, f["quota_jour"] - deja[0]["n"])
-    if pause:
+    brevo = [f for f in fournisseurs if f["type"] == "brevo"]
+    if pause and brevo:
+        noms = [f["nom"] for f in brevo]
         permis = max(0, PROSPECTION_PENDANT_NEWSLETTER - d1.requete(
-            "SELECT count(*) AS n FROM envois WHERE fournisseur IS NOT NULL AND envoye_le >= ?", [debut])[0]["n"])
-        for f in fournisseurs:
+            f"SELECT count(*) AS n FROM envois WHERE fournisseur IN ({','.join('?' * len(noms))}) AND envoye_le >= ?",
+            [*noms, debut])[0]["n"])
+        for f in brevo:
             f["reste"] = min(f["reste"], permis)
             permis -= f["reste"]
     resume = {"instant": instant.isoformat(timespec="minutes"), "apercu": apercu,
@@ -336,7 +374,7 @@ def principal():
                 if len(etat["erreurs"]) >= 5:
                     break
                 continue
-            try:  # identifiant du message, pour rattacher les événements de Brevo (délivré, ouvert…)
+            try:  # identifiant du message, pour rattacher les événements du service (délivré, erreur, plainte…)
                 d1.requete("UPDATE envois SET message_id = ? WHERE campagne_id = ? AND email = ? AND etape = 1",
                            [message_id, c["id"], d["email"]])
             except QuotaD1:
