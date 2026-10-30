@@ -63,6 +63,8 @@ SOURCES = {"osm": "OpenStreetMap", "datatourisme": "DATAtourisme (offices de tou
            "site": "votre site", "prompt": "un annuaire public", "manuel": "une source publique"}
 RE_DEPARTEMENT = re.compile(r"^(2[AB]|[0-9]{2,3})$")
 RE_CATEGORIE = re.compile(r"^[a-z_]{2,40}$")
+# Pendant la diffusion de la newsletter (même quota Brevo) : e-mails de prospection gardés par jour
+PROSPECTION_PENDANT_NEWSLETTER = int(os.environ.get("PROSPECTION_PENDANT_NEWSLETTER", "30"))
 
 
 def minutes(hhmm: str) -> int:
@@ -265,22 +267,24 @@ def principal():
         instant = datetime.fromisoformat(os.environ["INSTANT"]).astimezone(PARIS)
     debut = debut_du_jour_utc(instant)
     horodatage = instant.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    # Newsletter des inscrits en cours de diffusion (Edge Function admin, même quota Brevo) : pause
+    # Newsletter des inscrits en cours de diffusion (Edge Function admin, même quota Brevo) : la prospection
+    # est limitée à PROSPECTION_PENDANT_NEWSLETTER e-mails par jour (30 par défaut), le reste va à la newsletter
     d1.requete("CREATE TABLE IF NOT EXISTS pauses (motif TEXT PRIMARY KEY, jusqu_au TEXT NOT NULL)")
     pause = d1.requete("SELECT motif, jusqu_au FROM pauses WHERE jusqu_au > ?", [horodatage])
-    if pause and not apercu:
-        resume = {"instant": instant.isoformat(timespec="minutes"), "pause": pause}
-        print(json.dumps(resume, ensure_ascii=False, indent=1))
-        if os.environ.get("RESUME"):
-            with open(os.environ["RESUME"], "w") as f:
-                json.dump(resume, f, ensure_ascii=False, indent=1)
-        return
     fournisseurs = d1.requete("SELECT * FROM fournisseurs WHERE actif = 1 ORDER BY priorite, nom")
     for f in fournisseurs:
         deja = d1.requete("SELECT count(*) AS n FROM envois WHERE fournisseur = ? AND envoye_le >= ?", [f["nom"], debut])
         f["reste"] = max(0, f["quota_jour"] - deja[0]["n"])
+    if pause:
+        permis = max(0, PROSPECTION_PENDANT_NEWSLETTER - d1.requete(
+            "SELECT count(*) AS n FROM envois WHERE fournisseur IS NOT NULL AND envoye_le >= ?", [debut])[0]["n"])
+        for f in fournisseurs:
+            f["reste"] = min(f["reste"], permis)
+            permis -= f["reste"]
     resume = {"instant": instant.isoformat(timespec="minutes"), "apercu": apercu,
               "fournisseurs": {f["nom"]: f["reste"] for f in fournisseurs}, "campagnes": {}}
+    if pause:
+        resume["newsletter"] = {"pause": pause, "plafond_prospection": PROSPECTION_PENDANT_NEWSLETTER}
     campagnes = d1.requete("SELECT * FROM campagnes WHERE statut = 'active' AND (debut_le IS NULL OR debut_le <= ?) "
                            "ORDER BY id", [horodatage])
     for c in campagnes:
