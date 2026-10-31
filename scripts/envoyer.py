@@ -16,7 +16,8 @@ Services : Brevo (API transactionnelle) et Amazon SES (API v2, sans suivi des ou
 événements remontent à la fonction `prospection` par Amazon SNS).
 
 Variables : celles de D1 ; BREVO_API_KEY ; AWS_SES_ACCESS_KEY_ID, AWS_SES_SECRET_ACCESS_KEY, AWS_SES_REGION ; LIEN_SECRET (signature des liens de désinscription) ;
-DESINSCRIPTION_URL (page du site) ; FONCTION_URL (désinscription en un clic) ;
+DESINSCRIPTION_URL (page du site) ; FONCTION_URL (désinscription en un clic) ; DOMAINE_LIENS (domaine des liens
+vers le site, par défaut franceresto-pro.net) ;
 APERCU=oui : rien n'est envoyé ni écrit, résumé et premier e-mail affichés ; D1_TEST : fichier SQLite
 à la place de D1 (essais).
 """
@@ -128,8 +129,26 @@ def joli(texte: str | None) -> str:
 
 
 SITE = "https://franceresto.net"
+# Liens vers le site écrits avec le domaine d'envoi, qui redirige vers franceresto.net (chemin et paramètres
+# conservés) : franceresto.net est connu de Razor (30/10 : même message, −4,2 points avec franceresto.net, aucun
+# avec franceresto-pro.net). Les adresses e-mail (contact@franceresto.net) ne sont pas touchées.
+DOMAINE_LIENS = os.environ.get("DOMAINE_LIENS", "franceresto-pro.net")
+RE_DOMAINE_SITE = re.compile(r"(?<![@\w.-])(?:www\.)?franceresto\.net\b")
+
+
+def vers_domaine_liens(texte: str) -> str:
+    return RE_DOMAINE_SITE.sub(DOMAINE_LIENS, texte)
 RE_LIEN_SITE = re.compile(r"https://(?:www\.)?franceresto\.net(?:[/?#][^\s\"'<>)]*)?")
 RE_HREF_SITE = re.compile(r'href="(https://(?:www\.)?franceresto\.net(?:[/?#][^"]*)?)"')
+# {{lien}} dans le HTML (seul, ou en lien écrit par l'écran Prospection) : bouton bordeaux « ICI », pour ne pas
+# afficher l'adresse du domaine de liens ; dans un attribut (href="{{lien}}"), l'adresse reste telle quelle
+BORDEAUX = "#800020"
+RE_LIEN_BOUTON = re.compile(r'<a href="\{\{\s*lien\s*\}\}">\{\{\s*lien_affiche\s*\}\}</a>|(?<![="\'])\{\{\s*lien\s*\}\}')
+
+
+def bouton(url: str) -> str:
+    return (f'<a href="{html.escape(url)}" style="display:inline-block;padding:10px 26px;background:{BORDEAUX};'
+            f'color:#ffffff;font-weight:bold;text-decoration:none;border-radius:4px">ICI</a>')
 
 
 def avec_utm(url: str, campagne: dict) -> str:
@@ -153,7 +172,7 @@ def suivi_texte(url: str, campagne: dict) -> str:
 def rendre(gabarit: str | None, valeurs: dict, en_html: bool) -> str:
     def remplacer(m):
         v = valeurs.get(m.group(1), "")
-        return html.escape(v) if en_html else v
+        return v if m.group(1) == "bouton_lien" else html.escape(v) if en_html else v
     return re.sub(r"\{\{\s*(\w+)\s*\}\}", remplacer, gabarit or "")
 
 
@@ -173,17 +192,20 @@ def composer(campagne: dict, d: dict) -> dict:
                  f'<p style="font-size:12px;color:#666;line-height:1.5">{html.escape(IDENTITE)}.<br>'
                  f'Vous recevez ce message car l\'adresse {html.escape(d["email"])} est publiée sur '
                  f'{html.escape(origine)}.<br><a href="{html.escape(page)}">Ne plus recevoir nos messages</a></p>')
-    corps_html = rendre(campagne["contenu_html"], valeurs, True)
-    corps_texte = rendre(campagne["contenu_texte"], valeurs, False) or html.unescape(re.sub(r"<[^>]+>", "", corps_html))
+    valeurs["bouton_lien"] = bouton(valeurs["lien"])
+    corps_html = rendre(RE_LIEN_BOUTON.sub("{{bouton_lien}}", campagne["contenu_html"] or ""), valeurs, True)
+    corps_texte = (rendre(campagne["contenu_texte"], valeurs, False)
+                   or html.unescape(re.sub(r"<[^>]+>", "", rendre(campagne["contenu_html"], valeurs, True))))
     # Liens vers le site suivis par campagne : cibles des liens HTML (le texte affiché reste lisible) et
     # adresses de la version texte ; le pied de page, ajouté ensuite, n'est pas concerné
     corps_html = RE_HREF_SITE.sub(
         lambda m: f'href="{html.escape(avec_utm(html.unescape(m.group(1)), campagne))}"', corps_html)
     corps_texte = RE_LIEN_SITE.sub(lambda m: suivi_texte(m.group(0), campagne), corps_texte)
     return {
-        "objet": rendre(campagne["objet"], valeurs, False),
-        "html": f'<div style="font-family:Arial,sans-serif;font-size:15px;line-height:1.6">{corps_html}{pied_html}</div>',
-        "texte": corps_texte + pied_texte,
+        "objet": vers_domaine_liens(rendre(campagne["objet"], valeurs, False)),
+        "html": vers_domaine_liens(
+            f'<div style="font-family:Arial,sans-serif;font-size:15px;line-height:1.6">{corps_html}{pied_html}</div>'),
+        "texte": vers_domaine_liens(corps_texte + pied_texte),
         "entetes": {"List-Unsubscribe": f"<{un_clic}>", "List-Unsubscribe-Post": "List-Unsubscribe=One-Click"},
     }
 
