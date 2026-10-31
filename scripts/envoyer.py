@@ -144,6 +144,10 @@ RE_HREF_SITE = re.compile(r'href="(https://(?:www\.)?franceresto\.net(?:[/?#][^"
 # afficher l'adresse du domaine de liens ; dans un attribut (href="{{lien}}"), l'adresse reste telle quelle
 BORDEAUX = "#800020"
 RE_LIEN_BOUTON = re.compile(r'<a href="\{\{\s*lien\s*\}\}">\{\{\s*lien_affiche\s*\}\}</a>|(?<![="\'])\{\{\s*lien\s*\}\}')
+# Adresse du site écrite en clair dans le message (lien dont le texte est l'adresse) : même bouton « ICI » ;
+# une adresse saisie avec le domaine de liens est d'abord ramenée à franceresto.net (suivi de la campagne)
+RE_LIEN_NU = re.compile(r'<a href="(https://(?:www\.)?franceresto\.net(?:[/?#][^"]*)?)">\1</a>')
+RE_ADRESSE_LIENS = re.compile(r"https://(?:www\.)?franceresto-pro\.net\b")
 
 
 def bouton(url: str) -> str:
@@ -193,9 +197,12 @@ def composer(campagne: dict, d: dict) -> dict:
                  f'Vous recevez ce message car l\'adresse {html.escape(d["email"])} est publiée sur '
                  f'{html.escape(origine)}.<br><a href="{html.escape(page)}">Ne plus recevoir nos messages</a></p>')
     valeurs["bouton_lien"] = bouton(valeurs["lien"])
-    corps_html = rendre(RE_LIEN_BOUTON.sub("{{bouton_lien}}", campagne["contenu_html"] or ""), valeurs, True)
-    corps_texte = (rendre(campagne["contenu_texte"], valeurs, False)
-                   or html.unescape(re.sub(r"<[^>]+>", "", rendre(campagne["contenu_html"], valeurs, True))))
+    gabarit_html = RE_ADRESSE_LIENS.sub(SITE, campagne["contenu_html"] or "")
+    gabarit_texte = RE_ADRESSE_LIENS.sub(SITE, campagne["contenu_texte"] or "")
+    corps_html = rendre(RE_LIEN_NU.sub(lambda m: bouton(html.unescape(m.group(1))),
+                                       RE_LIEN_BOUTON.sub("{{bouton_lien}}", gabarit_html)), valeurs, True)
+    corps_texte = (rendre(gabarit_texte, valeurs, False)
+                   or html.unescape(re.sub(r"<[^>]+>", "", rendre(gabarit_html, valeurs, True))))
     # Liens vers le site suivis par campagne : cibles des liens HTML (le texte affiché reste lisible) et
     # adresses de la version texte ; le pied de page, ajouté ensuite, n'est pas concerné
     corps_html = RE_HREF_SITE.sub(
