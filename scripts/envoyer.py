@@ -147,8 +147,8 @@ RE_LIEN_BOUTON = re.compile(r'<a href="\{\{\s*lien\s*\}\}">\{\{\s*lien_affiche\s
 
 
 def bouton(url: str) -> str:
-    return (f'<a href="{html.escape(url)}" style="display:inline-block;padding:10px 26px;background:{BORDEAUX};'
-            f'color:#ffffff;font-weight:bold;text-decoration:none;border-radius:4px">ICI</a>')
+    return (f'<a href="{html.escape(url)}" style="display:inline-block;padding:2px 12px;background:{BORDEAUX};'
+            f'color:#ffffff;font-size:13px;line-height:20px;font-weight:bold;text-decoration:none;border-radius:4px">ICI</a>')
 
 
 def avec_utm(url: str, campagne: dict) -> str:
