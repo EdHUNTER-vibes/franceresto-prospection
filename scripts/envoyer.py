@@ -140,6 +140,15 @@ def vers_domaine_liens(texte: str) -> str:
     return RE_DOMAINE_SITE.sub(DOMAINE_LIENS, texte)
 RE_LIEN_SITE = re.compile(r"https://(?:www\.)?franceresto\.net(?:[/?#][^\s\"'<>)]*)?")
 RE_HREF_SITE = re.compile(r'href="(https://(?:www\.)?franceresto\.net(?:[/?#][^"]*)?)"')
+# {{lien}} dans le HTML (seul, ou en lien écrit par l'écran Prospection) : bouton bordeaux « ICI », pour ne pas
+# afficher l'adresse du domaine de liens ; dans un attribut (href="{{lien}}"), l'adresse reste telle quelle
+BORDEAUX = "#800020"
+RE_LIEN_BOUTON = re.compile(r'<a href="\{\{\s*lien\s*\}\}">\{\{\s*lien_affiche\s*\}\}</a>|(?<![="\'])\{\{\s*lien\s*\}\}')
+
+
+def bouton(url: str) -> str:
+    return (f'<a href="{html.escape(url)}" style="display:inline-block;padding:10px 26px;background:{BORDEAUX};'
+            f'color:#ffffff;font-weight:bold;text-decoration:none;border-radius:4px">ICI</a>')
 
 
 def avec_utm(url: str, campagne: dict) -> str:
@@ -163,7 +172,7 @@ def suivi_texte(url: str, campagne: dict) -> str:
 def rendre(gabarit: str | None, valeurs: dict, en_html: bool) -> str:
     def remplacer(m):
         v = valeurs.get(m.group(1), "")
-        return html.escape(v) if en_html else v
+        return v if m.group(1) == "bouton_lien" else html.escape(v) if en_html else v
     return re.sub(r"\{\{\s*(\w+)\s*\}\}", remplacer, gabarit or "")
 
 
@@ -183,8 +192,10 @@ def composer(campagne: dict, d: dict) -> dict:
                  f'<p style="font-size:12px;color:#666;line-height:1.5">{html.escape(IDENTITE)}.<br>'
                  f'Vous recevez ce message car l\'adresse {html.escape(d["email"])} est publiée sur '
                  f'{html.escape(origine)}.<br><a href="{html.escape(page)}">Ne plus recevoir nos messages</a></p>')
-    corps_html = rendre(campagne["contenu_html"], valeurs, True)
-    corps_texte = rendre(campagne["contenu_texte"], valeurs, False) or html.unescape(re.sub(r"<[^>]+>", "", corps_html))
+    valeurs["bouton_lien"] = bouton(valeurs["lien"])
+    corps_html = rendre(RE_LIEN_BOUTON.sub("{{bouton_lien}}", campagne["contenu_html"] or ""), valeurs, True)
+    corps_texte = (rendre(campagne["contenu_texte"], valeurs, False)
+                   or html.unescape(re.sub(r"<[^>]+>", "", rendre(campagne["contenu_html"], valeurs, True))))
     # Liens vers le site suivis par campagne : cibles des liens HTML (le texte affiché reste lisible) et
     # adresses de la version texte ; le pied de page, ajouté ensuite, n'est pas concerné
     corps_html = RE_HREF_SITE.sub(
