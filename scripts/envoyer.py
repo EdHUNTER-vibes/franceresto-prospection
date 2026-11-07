@@ -63,6 +63,14 @@ SPECIALITES = {
     "formateur": "formateur", "ecole_hoteliere": "école hôtelière", "centre_formation": "centre de formation",
     "consultant_chr": "consultant CHR", "logiciel_caisse": "logiciel de caisse", "immobilier_chr": "immobilier CHR",
     "services_techniques": "services techniques",
+    "solutions_numeriques": "solutions numériques",
+    "fournisseur_cuisine": "équipement de cuisine professionnelle",
+    "fournisseur_mobilier": "mobilier et aménagement",
+    "fournisseur_art_table": "arts de la table",
+    "fournisseur_alimentaire": "produits alimentaires et boissons",
+    "fournisseur_hygiene": "hygiène et produits d'accueil",
+    "fournisseur_linge": "linge et textile professionnel",
+    "fournisseur_chr": "fournisseur CHR",
 }
 SOURCES = {"osm": "OpenStreetMap", "datatourisme": "DATAtourisme (offices de tourisme)",
            "site": "votre site", "prompt": "un annuaire public", "manuel": "une source publique"}
