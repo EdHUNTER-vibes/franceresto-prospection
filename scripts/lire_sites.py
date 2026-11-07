@@ -168,23 +168,44 @@ async def lire_site(client: httpx.AsyncClient, etab: dict) -> dict:
     return resultat
 
 
-async def verifier_domaines(domaines: set[str]) -> dict[str, bool]:
+PARALLELE_DNS = int(os.environ.get("PARALLELE_DNS", "20"))
+
+
+async def verifier_domaines(domaines: set[str]) -> dict[str, bool | None]:
+    """Domaine → True (MX ou A), False (inexistant, ou ni MX ni A), None (pas de réponse : à revérifier).
+
+    Requêtes limitées à PARALLELE_DNS à la fois, 3 essais : lancées toutes ensemble, des milliers de
+    requêtes saturaient le résolveur et chaque expiration comptait comme un domaine inexistant
+    (≈ 16 000 adresses écartées à tort le 26/10, revérifiées par reverifier_domaines.py)."""
     resolveur = dns.asyncresolver.Resolver()
     resolveur.lifetime = 8
+    limite = asyncio.Semaphore(PARALLELE_DNS)
 
     async def un(d):
-        for type_rr in ("MX", "A"):
-            try:
-                await resolveur.resolve(d, type_rr)
-                return d, True
-            except (dns.resolver.NXDOMAIN, dns.resolver.NoNameservers):
-                return d, False
-            except (dns.resolver.NoAnswer, dns.exception.Timeout):
-                continue
-        return d, False
+        async with limite:
+            for essai in range(3):
+                reponses = []
+                for type_rr in ("MX", "A"):
+                    try:
+                        await resolveur.resolve(d, type_rr)
+                        return d, True
+                    except dns.resolver.NXDOMAIN:
+                        return d, False
+                    except dns.resolver.NoAnswer:
+                        reponses.append(True)
+                    except (dns.resolver.NoNameservers, dns.exception.Timeout):
+                        reponses.append(False)
+                if all(reponses):  # le domaine existe mais n'a ni MX ni A
+                    return d, False
+                await asyncio.sleep(1 + essai * 2)
+            return d, None
 
     resultats = await asyncio.gather(*(un(d) for d in domaines))
     return dict(resultats)
+
+
+def statut_domaine(v: bool | None) -> str:
+    return "valide" if v else "invalide" if v is False else "a_verifier"
 
 
 async def principal():
@@ -227,13 +248,13 @@ async def principal():
     date = maintenant()
     nouveaux = {e: r["noms"] for r in resultats for e in r["emails"]}
     valides = await verifier_domaines({e.split("@")[1] for e in nouveaux})
-    emails = [(e, e.split("@")[1], type_email(e, *noms), "valide" if valides.get(e.split("@")[1]) else "invalide",
+    emails = [(e, e.split("@")[1], type_email(e, *noms), statut_domaine(valides.get(e.split("@")[1])),
                date, date) for e, noms in nouveaux.items()]
     sources = [(e, r["siret"], "site", u, date) for r in resultats for e, u in r["emails"].items()]
     if emails:
         d1.inserer("emails", ["email", "domaine", "type", "statut", "verifie_le", "cree_le"], emails,
                    """ON CONFLICT (email) DO UPDATE SET
-                        statut = CASE WHEN emails.statut IN ('a_verifier', 'valide', 'invalide')
+                        statut = CASE WHEN emails.statut IN ('a_verifier', 'valide', 'invalide') AND excluded.statut <> 'a_verifier'
                                       THEN excluded.statut ELSE emails.statut END,
                         type = excluded.type, verifie_le = excluded.verifie_le""")
         d1.inserer("email_sources", ["email", "siret", "source", "url", "consulte_le"], sources,
@@ -248,8 +269,8 @@ async def principal():
     restants = d1.requete("SELECT email FROM emails WHERE statut = 'a_verifier' LIMIT 2000")
     if restants:
         ok = await verifier_domaines({r["email"].split("@")[1] for r in restants})
-        for statut in ("valide", "invalide"):
-            lot = [r["email"] for r in restants if ok.get(r["email"].split("@")[1]) == (statut == "valide")]
+        for statut in ("valide", "invalide"):  # sans réponse : reste « a_verifier », revérifié au passage suivant
+            lot = [r["email"] for r in restants if statut_domaine(ok.get(r["email"].split("@")[1])) == statut]
             for i in range(0, len(lot), 90):
                 part = lot[i:i + 90]
                 d1.requete(f"UPDATE emails SET statut = ?, verifie_le = ? WHERE email IN ({','.join('?' * len(part))})",
@@ -261,7 +282,8 @@ async def principal():
                        for s in ("ok", "sans_email", "injoignable", "interdit_robots")},
         "emails_trouves": len(nouveaux),
         "emails_generiques": sum(1 for e in emails if e[2] == "generique"),
-        "domaines_invalides": sum(1 for v in valides.values() if not v),
+        "domaines_invalides": sum(1 for v in valides.values() if v is False),
+        "domaines_sans_reponse": sum(1 for v in valides.values() if v is None),
         "osm_verifies": len(restants), "duree_s": round(time.time() - debut),
     }
     print(json.dumps(resume, ensure_ascii=False, indent=1))
