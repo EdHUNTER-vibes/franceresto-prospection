@@ -24,7 +24,7 @@ from urllib.parse import urlparse
 
 sys.path.insert(0, os.path.dirname(__file__))
 from commun import MESSAGERIES, liste_departements, maintenant, ouvrir_base, ressemblance, sans_accents, type_email  # noqa: E402
-from lire_sites import verifier_domaines  # noqa: E402
+from lire_sites import statut_domaine, verifier_domaines  # noqa: E402
 
 CAMPAGNE_ANCIENNE = "Envois antérieurs des listes externes"
 DATE_ANCIENNE = "2026-10-14T00:00:00Z"
@@ -151,7 +151,7 @@ async def principal():
     for l, siret, comment in resultats:
         cible = siret or identifiant_provisoire(l["email"])
         dom = l["email"].split("@")[1]
-        emails.append((l["email"], dom, type_email(l["email"], l["nom"], noms.get(siret)), "valide" if valides.get(dom) else "invalide",
+        emails.append((l["email"], dom, type_email(l["email"], l["nom"], noms.get(siret)), statut_domaine(valides.get(dom)),
                        date, date))
         sources.append((l["email"], cible, "prompt", f"liste:{l['liste']}", l["importe_le"]))
         if l["statut_envoi"] == "envoye":
@@ -160,7 +160,7 @@ async def principal():
 
     d1.inserer("emails", ["email", "domaine", "type", "statut", "verifie_le", "cree_le"], emails,
                """ON CONFLICT (email) DO UPDATE SET
-                    statut = CASE WHEN emails.statut IN ('a_verifier', 'valide', 'invalide')
+                    statut = CASE WHEN emails.statut IN ('a_verifier', 'valide', 'invalide') AND excluded.statut <> 'a_verifier'
                                   THEN excluded.statut ELSE emails.statut END,
                     verifie_le = excluded.verifie_le""")
     # Une adresse qui passe d'une fiche provisoire à un établissement : l'ancienne source disparaît.
@@ -198,7 +198,7 @@ async def principal():
         "adresses": len(resultats),
         "rattachement": {k: sum(1 for *_, c in resultats if c == k) for k in ("domaine", "nom", "adresse", "aucun")},
         "deja_envoyees": len(envois),
-        "domaines_invalides": sum(1 for v in valides.values() if not v),
+        "domaines_invalides": sum(1 for v in valides.values() if v is False),
         "lignes_ecrites": d1.lignes_ecrites,
     }
     print(json.dumps(resume, ensure_ascii=False, indent=1))
