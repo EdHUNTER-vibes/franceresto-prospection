@@ -8,12 +8,15 @@
 # Secrets : CLOUDFLARE_API_TOKEN, LIEN_SECRET (signature des liens de désinscription), et ceux des services
 # d'envoi : BREVO_API_KEY ; AWS_SES_ACCESS_KEY_ID, AWS_SES_SECRET_ACCESS_KEY, AWS_SES_REGION (Amazon SES) ;
 # variable ou secret R2_ACCOUNT_ID.
-# Lancement programmé : heure UTC (6 h – 16 h 45 UTC couvre les plages de 9 h à 17 h 30, heure de Paris).
+# Lancement programmé : heure UTC, toutes les heures dès minuit en semaine. Constaté du 27/10 au 09/11 : les
+# lancements programmés arrivent avec 6 à 8 h de retard et la plupart sont abandonnés par GitHub (un ou deux
+# par jour au plus, le premier vers 13–14 h UTC) ; programmés dès minuit, le premier arrive avant les plages
+# du matin. Avant 6 h UTC, la journée attend sans rien envoyer ni lire.
 name: Prospection – envois
 
 on:
   schedule:
-    - cron: "7 6-15 * * 1-5"
+    - cron: "7 0-15 * * 1-5"
   workflow_dispatch:
     inputs:
       apercu:
@@ -84,10 +87,13 @@ jobs:
           }
           if [ "$JOURNEE" != "oui" ]; then python scripts/envoyer.py; resume; exit 0; fi
           debut=$(date -u +%s)
+          debut_jour=$(date -u -d "today 06:00" +%s)
           fin_jour=$(date -u -d "today 16:45" +%s)
           while :; do
-            python scripts/envoyer.py || echo "::warning::Passage en échec, nouvel essai au suivant"
-            resume
+            if [ "$(date -u +%s)" -ge "$debut_jour" ]; then
+              python scripts/envoyer.py || echo "::warning::Passage en échec, nouvel essai au suivant"
+              resume
+            fi
             maintenant=$(date -u +%s)
             prochain=$(( (maintenant - 420) / 1800 * 1800 + 420 + 1800 ))  # h07 ou h37 suivant
             if [ "$prochain" -ge "$fin_jour" ]; then echo "Fin de la journée d'envois"; break; fi
