@@ -4,12 +4,13 @@
 # Le premier lancement crée le fichier à partir de D1. Voir le README.
 # Secrets : CLOUDFLARE_API_TOKEN (« D1 : Edit »), R2_PROSPECTS_ACCESS_KEY_ID, R2_PROSPECTS_SECRET_ACCESS_KEY ;
 # variable ou secret R2_ACCOUNT_ID.
-# Lancement programmé : 5 h 17 UTC, après la remise à zéro du quota d'écritures de D1 (minuit UTC).
+# Lancement programmé : 0 h 17 UTC, après la remise à zéro du quota d'écritures de D1 (minuit UTC) ; avec le
+# retard habituel des lancements programmés (6 à 8 h), il arrive en début de matinée.
 name: Prospection – synchronisation D1
 
 on:
   schedule:
-    - cron: "17 5 * * *"
+    - cron: "17 0 * * *"
   workflow_dispatch:
     inputs:
       budget:
